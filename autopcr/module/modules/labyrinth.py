@@ -346,7 +346,8 @@ def _has_path_with_min_types(area_blocks: List[LabyrinthMapInfo],
         new_counts = dict(counts)
         if node.block_type in new_counts:
             new_counts[node.block_type] = new_counts[node.block_type] - 1
-        if node.IsAreaLastPoint:
+        # 用无出边的节点作为终点（IsAreaLastPoint 游戏 API 未返回）
+        if not adj.get(node_id):
             if all(v <= 0 for v in new_counts.values()):
                 return True
         for nid in adj.get(node_id, []):
