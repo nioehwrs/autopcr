@@ -405,7 +405,6 @@ def _check_filters(blocks: Dict[int, List[LabyrinthMapInfo]],
             for b in blk: cols.setdefault(b.column, []).append(b)
             theoretical = sum(max(_SCORE_MAP.get(b.block_type, 0) for b in cols[c]) for c in cols)
             if score != theoretical:
-                log_func(f"  区域{area_num}未达到理论最高分")
                 return False
 
     if quality:
