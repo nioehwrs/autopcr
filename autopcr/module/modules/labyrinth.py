@@ -486,10 +486,10 @@ class labyrinth_reset(Module):
         guild_id = self.get_config("labyrinth_reset_guild")
         target_bosses_area3: List[int] = self.get_config("labyrinth_reset_boss_area3")
         target_bosses_area5: List[int] = self.get_config("labyrinth_reset_boss_area5")
-        dual_ticket = self.get_config("labyrinth_reset_dual_ticket")
-        dual_elite = self.get_config("labyrinth_reset_dual_elite")
         route_pref = self.get_config("labyrinth_reset_route_pref")
-        dual_relic = (route_pref == "4图双遗物")
+        dual_ticket = (route_pref == "基础路线")
+        dual_elite = (route_pref == "基础路线")
+        dual_relic = (route_pref == "最多遗物路线")
         quality = (route_pref == "最优路线")
         max_attempts = self.get_config("labyrinth_reset_max_attempts")
 
