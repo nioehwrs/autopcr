@@ -390,7 +390,8 @@ def _check_filters(blocks: Dict[int, List[LabyrinthMapInfo]],
             eLabyrinthBlockType.RELIC: 2,
             eLabyrinthBlockType.HARD_QUEST: 2,
         }):
-            log_func("  最多遗物路线不满足：4图无同时包含2遗物+2精英的路径")
+            log_func("  最多遗物路线不满足，打印4图地图：")
+            _draw_map(log_func, a4)
             return False
 
     if quality:
