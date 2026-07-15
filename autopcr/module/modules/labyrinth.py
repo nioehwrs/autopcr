@@ -581,8 +581,8 @@ class labyrinth_reset(Module):
 
             # Success - print full details
             self._log(f"--- 第{attempt}次尝试 ---")
-            route_label = route_pref if route_pref != "基础路线" else "基础"
-            self._log(f"🎉 命中目标{route_label}路线开局，总尝试次数:{attempt}")
+            route_label = route_pref.replace("路线", "") + "路线"
+            self._log(f"🎉 命中目标{route_label}开局，总尝试次数:{attempt}")
             total_actual = 0
             for area_num in sorted(areas_dict):
                 blk = areas_dict[area_num]
