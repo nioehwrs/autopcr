@@ -579,8 +579,15 @@ class labyrinth_reset(Module):
             total_actual = 0
             for area_num in sorted(areas_dict):
                 blk = areas_dict[area_num]
-                if dual_relic and area_num == 4:
-                    # 最多遗物路线：显示满足 2 遗物+2 精英的路径，而非最优路径
+                if dual_ticket and area_num == 1:
+                    path_ids = _has_path_with_min_types(blk, {eLabyrinthBlockType.TICKET: 2})
+                    actual_score = sum(_SCORE_MAP.get(
+                        next(b for b in blk if b.block_id == bid).block_type, 0) for bid in path_ids)
+                elif dual_elite and area_num == 4:
+                    path_ids = _has_path_with_min_types(blk, {eLabyrinthBlockType.HARD_QUEST: 2})
+                    actual_score = sum(_SCORE_MAP.get(
+                        next(b for b in blk if b.block_id == bid).block_type, 0) for bid in path_ids)
+                elif dual_relic and area_num == 4:
                     path_ids = _has_path_with_min_types(blk, {
                         eLabyrinthBlockType.RELIC: 2,
                         eLabyrinthBlockType.HARD_QUEST: 2,
