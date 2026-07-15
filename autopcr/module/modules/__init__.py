@@ -11,7 +11,7 @@ from .daily import *
 from .exequip import *
 from .gacha import *
 from .hatsune import *
-from .labyrint import *
+from .labyrinth import *
 from .room import *
 from .shiori import *
 from .shop import *
@@ -212,7 +212,9 @@ tool_modules = ModuleList(
     '工具',
     'tool',
     [
-        labyrinth_start_reroll,
+        labyrinth_reset,
+        labyrinth_retire,
+        labyrinth_view,
         ex_equip_rainbow_enchance,
         ex_equip_power_maximun,
         set_my_party2,
@@ -233,6 +235,7 @@ tool_modules = ModuleList(
         clear_my_party,
         remove_cb_ex_equip,
         remove_cb_support,
+        remove_normal_ex_equip,
         redeem_unit_swap,
     ]
 )
