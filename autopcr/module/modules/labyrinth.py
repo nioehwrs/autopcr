@@ -402,6 +402,19 @@ def _check_filters(blocks: Dict[int, List[LabyrinthMapInfo]],
             return False
         # _check_filters 不保存路径，成功后在 do_task 中重新获取用于显示
 
+        # 其他区域必须达到理论最高分
+        for area_num in sorted(blocks):
+            if area_num == 4:
+                continue
+            blk = blocks[area_num]
+            score, _ = _optimal_path(blk)
+            cols: Dict[int, List[LabyrinthMapInfo]] = {}
+            for b in blk: cols.setdefault(b.column, []).append(b)
+            theoretical = sum(max(_SCORE_MAP.get(b.block_type, 0) for b in cols[c]) for c in cols)
+            if score != theoretical:
+                log_func(f"  区域{area_num}未达到理论最高分")
+                return False
+
     if quality:
         total_actual = total_theoretical = 0
         for area_num in sorted(blocks):
