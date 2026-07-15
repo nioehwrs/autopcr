@@ -327,11 +327,11 @@ def _can_reach(blocks, fc, fr, tc, tr):
 
 
 def _has_path_with_min_types(area_blocks: List[LabyrinthMapInfo],
-                             required: Dict[eLabyrinthBlockType, int]) -> bool:
-    """Check if there exists a path from column 1 to end with at least N nodes of each type."""
+                             required: Dict[eLabyrinthBlockType, int]) -> List[int]:
+    """Return a path (list of block_ids) from start to end with at least N nodes of each type, or empty list."""
     starts = [b for b in area_blocks if b.column == 1]
     if not starts:
-        return False
+        return []
     # Build adjacency
     adj: Dict[int, List[int]] = {}
     for b in area_blocks:
@@ -341,21 +341,27 @@ def _has_path_with_min_types(area_blocks: List[LabyrinthMapInfo],
                 if tgt:
                     adj.setdefault(b.block_id, []).append(tgt.block_id)
     # DFS all paths from each start node
-    def dfs(node_id: int, visited: set, counts: Dict[eLabyrinthBlockType, int]) -> bool:
+    def dfs(node_id: int, visited: set, counts: Dict[eLabyrinthBlockType, int],
+            path: List[int]) -> List[int]:
         node = next(b for b in area_blocks if b.block_id == node_id)
         new_counts = dict(counts)
         if node.block_type in new_counts:
             new_counts[node.block_type] = new_counts[node.block_type] - 1
-        # 用无出边的节点作为终点（IsAreaLastPoint 游戏 API 未返回）
+        # 用无出边的节点作为终点
         if not adj.get(node_id):
             if all(v <= 0 for v in new_counts.values()):
-                return True
+                return path + [node_id]
         for nid in adj.get(node_id, []):
             if nid not in visited:
-                if dfs(nid, visited | {nid}, new_counts):
-                    return True
-        return False
-    return any(dfs(s.block_id, {s.block_id}, dict(required)) for s in starts)
+                result = dfs(nid, visited | {nid}, new_counts, path + [node_id])
+                if result:
+                    return result
+        return []
+    for s in starts:
+        result = dfs(s.block_id, {s.block_id}, dict(required), [])
+        if result:
+            return result
+    return []
 
 
 def _check_filters(blocks: Dict[int, List[LabyrinthMapInfo]],
@@ -394,6 +400,7 @@ def _check_filters(blocks: Dict[int, List[LabyrinthMapInfo]],
             log_func("  最多遗物路线不满足，打印4图地图：")
             _draw_map(log_func, a4)
             return False
+        # _check_filters 不保存路径，成功后在 do_task 中重新获取用于显示
 
     if quality:
         total_actual = total_theoretical = 0
@@ -565,7 +572,16 @@ class labyrinth_reset(Module):
             total_theoretical = 0
             for area_num in sorted(areas_dict):
                 blk = areas_dict[area_num]
-                actual_score, path_ids = _optimal_path(blk)
+                if dual_relic and area_num == 4:
+                    # 最多遗物路线：显示满足 2 遗物+2 精英的路径，而非最优路径
+                    path_ids = _has_path_with_min_types(blk, {
+                        eLabyrinthBlockType.RELIC: 2,
+                        eLabyrinthBlockType.HARD_QUEST: 2,
+                    })
+                    actual_score = sum(_SCORE_MAP.get(
+                        next(b for b in blk if b.block_id == bid).block_type, 0) for bid in path_ids)
+                else:
+                    actual_score, path_ids = _optimal_path(blk)
                 path_str = _fmt_path(blk, path_ids)
                 cols: Dict[int, List[LabyrinthMapInfo]] = {}
                 for b in blk: cols.setdefault(b.column, []).append(b)
