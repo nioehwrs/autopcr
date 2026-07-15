@@ -581,8 +581,9 @@ class labyrinth_reset(Module):
 
             # Success - print full details
             self._log(f"--- 第{attempt}次尝试 ---")
-            self._log(f"🎉 命中目标完美路线开局，总尝试次数:{attempt}")
-            total_theoretical = 0
+            route_label = route_pref if route_pref != "基础路线" else "基础"
+            self._log(f"🎉 命中目标{route_label}路线开局，总尝试次数:{attempt}")
+            total_actual = 0
             for area_num in sorted(areas_dict):
                 blk = areas_dict[area_num]
                 if dual_relic and area_num == 4:
@@ -599,7 +600,7 @@ class labyrinth_reset(Module):
                 cols: Dict[int, List[LabyrinthMapInfo]] = {}
                 for b in blk: cols.setdefault(b.column, []).append(b)
                 theoretical = sum(max(_SCORE_MAP.get(b.block_type, 0) for b in cols[c]) for c in cols)
-                total_theoretical += theoretical
+                total_actual += actual_score
                 boss_tag = ""
                 for b in blk:
                     if b.block_type == eLabyrinthBlockType.BOSS_QUEST:
@@ -609,7 +610,7 @@ class labyrinth_reset(Module):
             guild_name = ""
             for gid, gname in _load_guild_list():
                 if gid == guild_id: guild_name = gname; break
-            self._log(f"  难度:{difficulty} 公会:{guild_name} 总计理论:{total_theoretical}")
+            self._log(f"  难度:{difficulty} 公会:{guild_name} 总计理论:{total_actual}")
 
             self._table({
                 "结果": "成功",
