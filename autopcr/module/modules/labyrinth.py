@@ -381,11 +381,16 @@ def _check_filters(blocks: Dict[int, List[LabyrinthMapInfo]],
 
     if dual_relic:
         a4 = blocks.get(4)
+        if a4:
+            from collections import Counter
+            t4 = Counter(b.block_type for b in a4)
+            log_func(f"  4图节点: {', '.join(f'{_TYPE_NAMES[t]}×{c}' for t, c in t4.most_common())}")
         # 要求4图存在一条路径，至少包含2个遗物和2个精英
         if not a4 or not _has_path_with_min_types(a4, {
             eLabyrinthBlockType.RELIC: 2,
             eLabyrinthBlockType.HARD_QUEST: 2,
         }):
+            log_func("  最多遗物路线不满足：4图无同时包含2遗物+2精英的路径")
             return False
 
     if quality:
