@@ -73,7 +73,7 @@ daily_modules = ModuleList(
         mirage_floor_receive,
         mirage_nemesis_sweep,
         tower_cloister_sweep,
-        labyrinth_sweep,
+        # labyrinth_sweep,  # 使用自制迷宫模块，不包含该模块
         jjc_reward,
         abyss_quest_sweep,
         abyss_boss_sweep,
