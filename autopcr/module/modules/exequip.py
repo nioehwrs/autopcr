@@ -390,6 +390,61 @@ class ex_equip_rank_up(Module):
             raise SkipError("没有可合成的EX装")
 
 
+# === ex_equip_state: EX状态保存/恢复（来自上游）===
+@name('EX状态保存/恢复')
+@default(False)
+@singlechoice('ex_equip_state_action', '行为', '保存', ['保存', '恢复'])
+@description('保存或恢复所有角色当前穿戴的普通EX装备状态。不影响账号配置，恢复时只处理有差异的部分，不会全部卸载。')
+class ex_equip_state(Module):
+    cache_key = 'state'
+
+    @staticmethod
+    def normal_ex_equip_state(client: pcrclient):
+        return {
+            str(unit_id): {str(ex_slot.slot): ex_slot.serial_id for ex_slot in unit.ex_equip_slot}
+            for unit_id, unit in client.data.unit.items()
+        }
+
+    @staticmethod
+    def group_ex_equip_changes(changes):
+        grouped = {}
+        for unit_id, slot, serial_id in changes:
+            grouped.setdefault(unit_id, []).append(ExtraEquipChangeSlot(slot=slot, serial_id=serial_id))
+        return [ExtraEquipChangeUnit(unit_id=unit_id, ex_equip_slot=slots, cb_ex_equip_slot=None) for unit_id, slots
+                in grouped.items()]
+
+    async def do_task(self, client: pcrclient):
+        action = self.get_config('ex_equip_state_action')
+        if action == '保存':
+            await self.save_state(client)
+        else:
+            await self.restore_state(client)
+
+    async def save_state(self, client: pcrclient):
+        self.set_cache(self.normal_ex_equip_state(client))
+        self._log(f"保存完成，共记录{len(client.data.unit)}个角色的EX装备状态")
+
+    async def restore_state(self, client: pcrclient):
+        saved_state = self.get_cache(delete=True)
+        if not saved_state:
+            raise SkipError("没有找到已保存的EX装备状态")
+        current_state = self.normal_ex_equip_state(client)
+        changes = []
+        for unit_id in saved_state:
+            saved_slots = saved_state[unit_id]
+            current_slots = current_state.get(unit_id, {})
+            for slot in saved_slots:
+                saved_serial_id = saved_slots[slot]
+                current_serial_id = current_slots.get(slot, 0)
+                if saved_serial_id != current_serial_id:
+                    changes.append((int(unit_id), int(slot), saved_serial_id))
+        if not changes:
+            raise SkipError("EX装备状态已一致，无需恢复")
+        changes = self.group_ex_equip_changes(changes)
+        await client.unit_equip_ex(changes)
+        self._log(f"恢复完成，共处理{len(changes)}个角色")
+
+
 @name('撤下会战EX装')
 @default(True)
 @description('')
