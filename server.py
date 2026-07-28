@@ -13,6 +13,7 @@ from .autopcr.util.unit_recognizer import instance as unit_recognizer
 from .autopcr.module.accountmgr import Account, AccountManager, instance as usermgr
 from .autopcr.db.dbstart import db_start
 from .autopcr.core.clientpool import instance as clientpool
+from .autopcr.module.modules.labyrinth import _AREA3_UNIT_IDS, _AREA5_UNIT_IDS
 from .autopcr.util.draw import instance as drawer
 from .autopcr.util.excel_export import export_excel
 import asyncio, datetime
@@ -67,7 +68,6 @@ sv_help = f"""
 - {prefix}查装备 [<rank>] [fav] 查询缺口装备，rank为数字，只查询>=rank的角色缺口装备，fav表示只查询favorite的角色
 - {prefix}查深域 查询深域通关情况
 - {prefix}查公会深域 查询公会深域通关情况
-- {prefix}黎明界开局 <美食殿堂|破晓之星|咲恋救济院|王宫骑士团|拉比林斯> 可以只打部分字
 - {prefix}刷图推荐 [<rank>] [fav] 查询缺口装备的刷图推荐，格式同上
 - {prefix}公会支援 查询公会支援角色配置
 - {prefix}卡池 查看当前卡池
@@ -996,8 +996,8 @@ async def half_schedule(botev: BotEvent):
 # async def return_jewel(botev: BotEvent):
     # return {}
 
-@register_tool("黎明界开局", "labyrinth_start_reroll")
-async def labyrinth_start_reroll(botev: BotEvent):
+@register_tool("黎明界开局", "labyrinth_reset")
+async def labyrinth_reset(botev: BotEvent):
     guild_id = 0
     msg = await botev.message()
     try:
@@ -1011,7 +1011,9 @@ async def labyrinth_start_reroll(botev: BotEvent):
     if guild_id == 0:
         await botev.finish(f"未找到公会，请输入包含以下公会名字：" + "\n".join([guild.guild_name.replace(r"\n", "") for guild in db.labyrinth_enter_guild.values()]))
     return {
-            "labyrinth_reroll_guild_id": guild_id,
+            "labyrinth_reset_guild": guild_id,
+            "labyrinth_reset_boss_area3": _AREA3_UNIT_IDS,
+            "labyrinth_reset_boss_area5": _AREA5_UNIT_IDS,
     }
 
 @register_tool("查深域", "find_talent_quest")
