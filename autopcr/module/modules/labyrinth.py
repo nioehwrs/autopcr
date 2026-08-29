@@ -1,17 +1,170 @@
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List
 
 from ..modulebase import *
 from ..config import *
 from ...core.pcrclient import pcrclient
-from ...model.error import *
+from ...model.requests import (
+    LabyrinthTopRequest, LabyrinthEnterRequest,
+    LabyrinthRetireRequest, LabyrinthResumeRequest,
+)
+from ...model.enums import eLabyrinthBlockType, eInventoryType
+from ...model.common import LabyrinthMapInfo
 from ...db.database import db
-from ...model.enums import eLabyrinthBlockType
+from ...db.models import (
+    LabyrinthQuestDatum, LabyrinthWaveGroupDatum,
+    LabyrinthEnemyParameter,
+)
 
-LABYRINTH_BLOCK_TYPE_NAME = {
-    eLabyrinthBlockType.NONE: "起点",
-    eLabyrinthBlockType.NORMAL_QUEST: "普通怪物",
-    eLabyrinthBlockType.HARD_QUEST: "EX怪物",
-    eLabyrinthBlockType.TICKET: "角色",
+# Cache: quest_id -> main boss unit_id (highest HP enemy in the wave)
+_boss_unit_cache: Dict[int, int] = {}
+# Cache: unit_id -> boss display name
+_boss_name_cache: Dict[int, str] = {}
+
+
+def _get_session():
+    return db.dbmgr.session()
+
+
+def _get_boss_unit_id(quest_id: int) -> int:
+    """Get the main boss unit_id (highest HP enemy) for a given boss quest_id."""
+    if quest_id in _boss_unit_cache:
+        return _boss_unit_cache[quest_id]
+
+    session = _get_session()
+    try:
+        quest = session.query(LabyrinthQuestDatum).filter(
+            LabyrinthQuestDatum.quest_id == quest_id
+        ).first()
+        if not quest:
+            _boss_unit_cache[quest_id] = 0
+            return 0
+
+        wave = session.query(LabyrinthWaveGroupDatum).filter(
+            LabyrinthWaveGroupDatum.wave_group_id == quest.wave_group_id
+        ).first()
+        if not wave:
+            _boss_unit_cache[quest_id] = 0
+            return 0
+
+        enemy_ids = [
+            wave.enemy_id_1, wave.enemy_id_2, wave.enemy_id_3,
+            wave.enemy_id_4, wave.enemy_id_5
+        ]
+        best_unit_id = 0
+        best_hp = 0
+        for eid in enemy_ids:
+            if not eid:
+                continue
+            ep = session.query(LabyrinthEnemyParameter).filter(
+                LabyrinthEnemyParameter.enemy_id == eid
+            ).first()
+            if ep and ep.hp > best_hp:
+                best_hp = ep.hp
+                best_unit_id = ep.unit_id
+
+        _boss_unit_cache[quest_id] = best_unit_id
+    finally:
+        session.close()
+    return _boss_unit_cache[quest_id]
+
+
+def _get_boss_display_name(unit_id: int) -> str:
+    """Get display name for a boss unit_id."""
+    if not unit_id:
+        return "未知"
+    if unit_id in _boss_name_cache:
+        return _boss_name_cache[unit_id]
+
+    session = _get_session()
+    try:
+        ep = session.query(LabyrinthEnemyParameter).filter(
+            LabyrinthEnemyParameter.unit_id == unit_id
+        ).first()
+        if ep:
+            _boss_name_cache[unit_id] = ep.name
+        else:
+            _boss_name_cache[unit_id] = f"unit_{unit_id}"
+    finally:
+        session.close()
+    return _boss_name_cache[unit_id]
+
+
+# --- Static data: guilds and bosses ---
+
+_GUILD_LIST: List[Tuple[int, str]] = []  # loaded lazily from DB
+
+# Manual guild name overrides for known inconsistencies
+_GUILD_NAME_MAP = {
+    "破曉 之星": "破曉之星",
+}
+
+
+def _clean_guild_name(raw: str) -> str:
+    name = raw.replace("\\n", " ")
+    if name in _GUILD_NAME_MAP:
+        return _GUILD_NAME_MAP[name]
+    # Strip trailing parenthesized suffix e.g. "王宫骑士团（ランドソル支部）" → "王宫骑士团"
+    for c in ("（", "("):
+        idx = name.find(c)
+        if idx > 0:
+            return name[:idx]
+    return name
+
+
+def _load_guild_list() -> List[Tuple[int, str]]:
+    global _GUILD_LIST
+    if not _GUILD_LIST:
+        session = _get_session()
+        try:
+            from ...db.models import LabyrinthEnterGuild
+            guilds = session.query(LabyrinthEnterGuild).all()
+            _GUILD_LIST = [(g.guild_id, _clean_guild_name(g.guild_name)) for g in guilds]
+        finally:
+            session.close()
+    return _GUILD_LIST
+
+
+# Area 3: 77033 series bosses
+_AREA3_BOSS_DATA: List[Tuple[int, str]] = [
+    (301206, "巨型魔像"),
+    (303306, "暗黑滴水嘴兽"),
+    (319604, "冰霜魔狼"),
+    (312505, "厄勒克特拉夫人"),
+    (306604, "毒液沙罗曼蛇"),
+]
+_AREA3_UNIT_IDS = [uid for uid, _ in _AREA3_BOSS_DATA]
+
+# Area 5: 77053 series bosses
+_AREA5_BOSS_DATA: List[Tuple[int, str]] = [
+    (302501, "奇美拉"),
+    (301701, "炸脖龙"),
+    (310103, "愤怒巨龙"),
+    (315004, "领主哥布林"),
+    (319401, "究极守护者"),
+]
+_AREA5_UNIT_IDS = [uid for uid, _ in _AREA5_BOSS_DATA]
+
+_BOSS_META: Dict[int, str] = {}
+for uid, bname in _AREA3_BOSS_DATA + _AREA5_BOSS_DATA:
+    _BOSS_META[uid] = bname
+
+# --- Map visualization ---
+
+_TYPE_SYMBOLS = {
+    eLabyrinthBlockType.NONE: "·",
+    eLabyrinthBlockType.NORMAL_QUEST: "⚔",
+    eLabyrinthBlockType.HARD_QUEST: "⚔",
+    eLabyrinthBlockType.TICKET: "🎫",
+    eLabyrinthBlockType.EVENT: "❓",
+    eLabyrinthBlockType.RELIC: "💎",
+    eLabyrinthBlockType.SHOP: "🛒",
+    eLabyrinthBlockType.BOSS_QUEST: "👑",
+}
+_TYPE_NAMES = {
+    eLabyrinthBlockType.NONE: "空",
+    eLabyrinthBlockType.NORMAL_QUEST: "普通战",
+    eLabyrinthBlockType.HARD_QUEST: "精英战",
+    eLabyrinthBlockType.TICKET: "门票",
     eLabyrinthBlockType.EVENT: "事件",
     eLabyrinthBlockType.RELIC: "遗物",
     eLabyrinthBlockType.SHOP: "商店",
@@ -19,311 +172,485 @@ LABYRINTH_BLOCK_TYPE_NAME = {
 }
 
 
-@description('刷分用。若已进入黎明界，会立刻撤退。\n完美开局指一层双角色、二层双角色+遗物+EX+遗物/商店，三层角色+遗物+遗物/事件，四层双角色+双EX，五层遗物/事件+双EX。遗物固定分，事件分可高可低。')
-@name('黎明界刷开局')
-@LabyrinthBossConfig('labyrinth_reroll_area5_boss', '区域5Boss', 5, [301701, 310103, 319401, 315004])
-@LabyrinthBossConfig('labyrinth_reroll_area3_boss', '区域3Boss', 3, [301206, 312505, 319604])
-@singlechoice('labyrinth_reroll_third_block_type', '区域3/5第3格', '事件', ['遗物', '事件', '任意'])
-@singlechoice('labyrinth_reroll_second_block_type', '区域2第4格', '遗物', ['遗物', '商店', '任意'])
-@singlechoice('labyrinth_reroll_max_count', '重开上限', 100, [100, 500, 1000, 2000])
-@booltype('labyrinth_reroll_perfect_start', '完美开局', False)
-@LabyrinthGuildConfig('labyrinth_reroll_guild_id', '公会', 5)
-@singlechoice('labyrinth_reroll_difficulty', '难度', 5, [1, 2, 3, 4, 5])
-class labyrinth_start_reroll(Module):
-    AREA_REQUIREMENTS: Dict[int, Dict[int, Set[eLabyrinthBlockType]]] = {
-        1: {
-            1: {eLabyrinthBlockType.NONE},
-            2: {eLabyrinthBlockType.NORMAL_QUEST},
-            3: {eLabyrinthBlockType.TICKET},
-            4: {eLabyrinthBlockType.NORMAL_QUEST},
-            5: {eLabyrinthBlockType.TICKET},
-            6: {eLabyrinthBlockType.RELIC},
-        },
-        2: {
-            1: {eLabyrinthBlockType.NONE},
-            2: {eLabyrinthBlockType.TICKET},
-            3: {eLabyrinthBlockType.NORMAL_QUEST},
-            4: {eLabyrinthBlockType.RELIC, eLabyrinthBlockType.SHOP},
-            5: {eLabyrinthBlockType.HARD_QUEST},
-            6: {eLabyrinthBlockType.TICKET},
-            7: {eLabyrinthBlockType.RELIC},
-        },
-        3: {
-            1: {eLabyrinthBlockType.NONE},
-            2: {eLabyrinthBlockType.NORMAL_QUEST},
-            3: {eLabyrinthBlockType.EVENT, eLabyrinthBlockType.RELIC},
-            4: {eLabyrinthBlockType.TICKET},
-            5: {eLabyrinthBlockType.HARD_QUEST},
-            6: {eLabyrinthBlockType.SHOP},
-            7: {eLabyrinthBlockType.BOSS_QUEST},
-        },
-        4: {
-            1: {eLabyrinthBlockType.NONE},
-            2: {eLabyrinthBlockType.TICKET},
-            3: {eLabyrinthBlockType.HARD_QUEST},
-            4: {eLabyrinthBlockType.EVENT},
-            5: {eLabyrinthBlockType.HARD_QUEST},
-            6: {eLabyrinthBlockType.NORMAL_QUEST},
-            7: {eLabyrinthBlockType.TICKET},
-            8: {eLabyrinthBlockType.SHOP},
-        },
-        5: {
-            1: {eLabyrinthBlockType.NONE},
-            2: {eLabyrinthBlockType.NORMAL_QUEST},
-            3: {eLabyrinthBlockType.EVENT, eLabyrinthBlockType.RELIC},
-            4: {eLabyrinthBlockType.HARD_QUEST},
-            5: {eLabyrinthBlockType.RELIC},
-            6: {eLabyrinthBlockType.HARD_QUEST},
-            7: {eLabyrinthBlockType.SHOP},
-            8: {eLabyrinthBlockType.BOSS_QUEST},
-        },
-    }
+def _draw_map(log_func, map_list: List[LabyrinthMapInfo]):
+    """Print a simple node map of the labyrinth."""
+    areas: Dict[int, List[LabyrinthMapInfo]] = {}
+    for block in map_list:
+        areas.setdefault(block.area, []).append(block)
 
-    def _block_type(self, block) -> int:
-        return int(block.block_type) if block.block_type is not None else 0
+    for area_num in sorted(areas.keys()):
+        blocks = areas[area_num]
+        max_col = max(b.column for b in blocks)
+        log_func("")
+        log_func(f"  ═══ 区域 {area_num}（共{max_col}列）═══")
+        log_func("")
 
-    def _position_name(self, block, area_columns: Dict[int, List]) -> str:
-        rows = [b.row for b in area_columns.get(block.column, [])]
-        max_row = max(rows) if rows else block.row
-        if max_row <= 1:
-            return "合流"
-        if max_row == 2:
-            return {1: "下", 2: "上"}.get(block.row, str(block.row))
-        if max_row == 3:
-            return {1: "下", 2: "中", 3: "上"}.get(block.row, str(block.row))
-        return str(block.row)
+        for col in range(1, max_col + 1):
+            col_blocks = [b for b in blocks if b.column == col]
+            if not col_blocks:
+                continue
 
-    def _boss_unit_ids(self, block) -> Set[int]:
-        quest_id = getattr(block, "quest_id", None)
-        if not quest_id:
-            return set()
-        quest = db.labyrinth_quest_data.get(quest_id)
-        if not quest:
-            return set()
-        wave_group = db.labyrinth_wave_group_data.get(quest.wave_group_id)
-        if not wave_group:
-            return set()
-        unit_ids: Set[int] = set()
-        for enemy_id in wave_group.get_enemy_ids():
-            enemy = db.labyrinth_enemy_parameter.get(enemy_id)
-            if enemy:
-                unit_ids.add(enemy.unit_id)
-        return unit_ids
+            log_func(f"  ── 列{col} ──────────────────────")
+            for b in sorted(col_blocks, key=lambda x: x.row):
+                sym = _TYPE_SYMBOLS.get(b.block_type, "?")
+                vis = "✓" if b.is_visited else " "
+                name = _TYPE_NAMES.get(b.block_type, "?")
 
-    def _boss_matches(self, area: int, block, area3_bosses: Set[int], area5_bosses: Set[int]) -> bool:
-        selected = area3_bosses if area == 3 else area5_bosses if area == 5 else set()
-        if not selected:
-            return True
-        return bool(self._boss_unit_ids(block) & selected)
+                line = f"    ({b.row}) [{sym}{vis}] {name}"
 
-    def _target_areas(self, difficulty: int) -> List[int]:
-        if difficulty == 1:
-            return [1, 2, 3]
-        return sorted(self.AREA_REQUIREMENTS)
+                # Targets
+                if b.next_block_id_list:
+                    targets = []
+                    for nid in b.next_block_id_list:
+                        tgt = next((x for x in blocks if x.block_id == nid), None)
+                        if tgt:
+                            sym2 = _TYPE_SYMBOLS.get(tgt.block_type, "?")
+                            targets.append(f"列{tgt.column}({tgt.row}){sym2}")
+                    if targets:
+                        line += "  → " + " ".join(targets)
 
-    def _max_unlocked_difficulty(self, top) -> int:
-        cleared = [
-            info.difficulty
-            for info in (top.guild_cleared_difficulty_list or [])
-            if info.difficulty is not None
-        ]
-        if not cleared:
-            return 1
-        return min(max(cleared) + 1, 5)
+                # Boss name
+                if b.block_type == eLabyrinthBlockType.BOSS_QUEST:
+                    boss_name = _get_boss_display_name(_get_boss_unit_id(b.quest_id))
+                    line += f"  🏆{boss_name}"
 
-    def _build_expected_block_types(self, third_block_type: str, second_block_type: str) -> Dict[int, Dict[int, Set[eLabyrinthBlockType]]]:
-        expected = {
-            area: {
-                column: set(block_types)
-                for column, block_types in requirements.items()
-            }
-            for area, requirements in self.AREA_REQUIREMENTS.items()
-        }
+                # Endpoint
+                if b.IsAreaLastPoint:
+                    line += " ⭐"
 
-        third_types = {
-            '遗物': {eLabyrinthBlockType.RELIC},
-            '事件': {eLabyrinthBlockType.EVENT},
-            '任意': {eLabyrinthBlockType.EVENT, eLabyrinthBlockType.RELIC},
-        }.get(third_block_type, {eLabyrinthBlockType.RELIC})
-        expected[3][3] = set(third_types)
-        expected[5][3] = set(third_types)
+                log_func(line)
 
-        second_types = {
-            '遗物': {eLabyrinthBlockType.RELIC},
-            '商店': {eLabyrinthBlockType.SHOP},
-            '任意': {eLabyrinthBlockType.RELIC, eLabyrinthBlockType.SHOP},
-        }.get(second_block_type, {eLabyrinthBlockType.RELIC})
-        expected[2][4] = set(second_types)
-        return expected
+        # Column-to-column connection summary
+        for col in range(1, max_col):
+            pairs = set()
+            for b in blocks:
+                if b.column == col and b.next_block_id_list:
+                    for nid in b.next_block_id_list:
+                        tgt = next((x for x in blocks if x.block_id == nid), None)
+                        if tgt:
+                            pairs.add(f"{b.row}→{tgt.row}")
+            if pairs:
+                log_func(f"    列{col}→列{col+1}: {', '.join(sorted(pairs))}")
 
-    def _find_area_route(self, area: int, map_list: List, area3_bosses: Set[int], area5_bosses: Set[int], perfect_start: bool, expected_block_types: Dict[int, Dict[int, Set[eLabyrinthBlockType]]]) -> Tuple[Optional[List], str]:
-        expected = self.AREA_REQUIREMENTS[area]
-        blocks = [block for block in map_list if block.area == area]
-        if not blocks:
-            return None, f"区域{area}没有地图数据"
-
-        by_id = {block.block_id: block for block in blocks}
-        by_column: Dict[int, List] = {}
-        for block in blocks:
-            by_column.setdefault(block.column, []).append(block)
-        for column_blocks in by_column.values():
-            column_blocks.sort(key=lambda block: block.row)
-
-        missing_columns = [column for column in expected if column not in by_column]
-        if missing_columns:
-            return None, f"区域{area}缺少列{missing_columns}"
-
-        last_column = max(expected)
-
-        def dfs(block, path: List, seen: Set[int]) -> Optional[List]:
-            column = block.column
-            if column in expected:
-                if perfect_start and self._block_type(block) not in expected_block_types[area][column]:
-                    return None
-
-            if column == last_column:
-                if eLabyrinthBlockType.BOSS_QUEST in expected[column] and not self._boss_matches(area, block, area3_bosses, area5_bosses):
-                    return None
-                return path + [block]
-
-            for next_block_id in block.next_block_id_list or []:
-                if next_block_id in seen:
-                    continue
-                next_block = by_id.get(next_block_id)
-                if not next_block:
-                    continue
-                route = dfs(next_block, path + [block], seen | {next_block_id})
-                if route:
-                    return route
-            return None
-
-        for start in by_column[1]:
-            route = dfs(start, [], {start.block_id})
-            if route:
-                return route, ""
-
-        return None, f"区域{area}没有满足条件的可达路线"
-
-    def _find_routes(self, map_list: List, difficulty: int, area3_bosses: Set[int], area5_bosses: Set[int], perfect_start: bool, expected_block_types: Dict[int, Dict[int, Set[eLabyrinthBlockType]]]) -> Tuple[Optional[Dict[int, List]], str]:
-        routes: Dict[int, List] = {}
-        failures = []
-        for area in self._target_areas(difficulty):
-            route, reason = self._find_area_route(area, map_list, area3_bosses, area5_bosses, perfect_start, expected_block_types)
-            if not route:
-                failures.append(reason)
-            else:
-                routes[area] = route
-        if failures:
-            return None, "；".join(failures)
-        return routes, ""
-
-    def _format_route(self, area: int, route: List, map_list: List, area3_bosses: Set[int], area5_bosses: Set[int]) -> str:
-        area_columns: Dict[int, List] = {}
-        for block in map_list:
-            if block.area == area:
-                area_columns.setdefault(block.column, []).append(block)
-
+        # Summary
+        from collections import Counter
+        type_counts = Counter(b.block_type for b in blocks)
         parts = []
-        for block in route:
-            position = self._position_name(block, area_columns)
-            block_type = self._block_type(block)
-            block_type_name = LABYRINTH_BLOCK_TYPE_NAME.get(block_type, str(block_type))
-            extra = ""
-            if block_type == eLabyrinthBlockType.BOSS_QUEST:
-                boss_units = self._boss_unit_ids(block)
-                if boss_units:
-                    selected = area3_bosses if area == 3 else area5_bosses if area == 5 else set()
-                    boss_info = db.labyrinth_boss_info.get(area, {})
-                    candidates = selected or set(boss_info)
-                    boss_names = [
-                        boss_info[unit_id]
-                        for unit_id in sorted(boss_units & candidates)
-                        if unit_id in boss_info
-                    ]
-                    if boss_names:
-                        extra = f"({'/'.join(boss_names)})"
-            parts.append(f"{block.column}{position}【{block_type_name}{extra}】")
-        return f"区域{area}：" + "-".join(parts)
+        for btype, count in type_counts.most_common():
+            parts.append(f"{_TYPE_NAMES.get(btype, '?')}×{count}")
+        log_func(f"  📊 {', '.join(parts)}")
 
+
+# --- Path scoring and analysis ---
+
+_SCORE_MAP = {
+    eLabyrinthBlockType.NONE: 0,
+    eLabyrinthBlockType.NORMAL_QUEST: 300,
+    eLabyrinthBlockType.HARD_QUEST: 1200,
+    eLabyrinthBlockType.TICKET: 400,
+    eLabyrinthBlockType.EVENT: 350,
+    eLabyrinthBlockType.RELIC: 300,
+    eLabyrinthBlockType.SHOP: 100,
+    eLabyrinthBlockType.BOSS_QUEST: 1900,
+}
+
+# 事件记为0分，用于「最优路线（忽略事件）」：等同最优路线算法，但不计事件价值
+_SCORE_MAP_NO_EVENT = {**_SCORE_MAP, eLabyrinthBlockType.EVENT: 0}
+
+_PATH_NAMES = {
+    eLabyrinthBlockType.NONE: "起点",
+    eLabyrinthBlockType.NORMAL_QUEST: "普通怪物",
+    eLabyrinthBlockType.HARD_QUEST: "困难怪物",
+    eLabyrinthBlockType.TICKET: "角色",
+    eLabyrinthBlockType.EVENT: "事件",
+    eLabyrinthBlockType.RELIC: "遗物",
+    eLabyrinthBlockType.SHOP: "商店",
+    eLabyrinthBlockType.BOSS_QUEST: "Boss",
+}
+
+_ROW_LABELS = {1: "上", 2: "中", 3: "下"}
+
+
+def _optimal_path(blocks: List[LabyrinthMapInfo], score_map: Dict[eLabyrinthBlockType, int] = None):
+    """DP: max score & optimal path. Returns (score, [block_id...])."""
+    score_map = score_map if score_map is not None else _SCORE_MAP
+    dp, nxt = {}, {}
+    for col in range(max(b.column for b in blocks), 0, -1):
+        for b in (x for x in blocks if x.column == col):
+            s = score_map.get(b.block_type, 0)
+            best, best_n = 0, None
+            if b.next_block_id_list:
+                for nid in b.next_block_id_list:
+                    bs = dp.get(nid)
+                    if bs is not None and bs > best:
+                        best, best_n = bs, nid
+            dp[b.block_id] = s + best
+            nxt[b.block_id] = best_n
+    starts = [b for b in blocks if b.column == 1]
+    if not starts: return 0, []
+    start = max(starts, key=lambda b: dp.get(b.block_id, 0))
+    path = [start.block_id]
+    while nxt.get(path[-1]) is not None:
+        path.append(nxt[path[-1]])
+    return dp.get(start.block_id, 0), path
+
+
+def _fmt_path(blocks: List[LabyrinthMapInfo], path_ids: List[int]) -> str:
+    """Format optimal path as compact string."""
+    m = {b.block_id: b for b in blocks}
+    cc = {}
+    for b in blocks: cc[b.column] = cc.get(b.column, 0) + 1
+    parts = []
+    for bid in path_ids:
+        b = m[bid]
+        rl = "合流" if cc.get(b.column, 1) <= 1 else _ROW_LABELS.get(b.row, "?")
+        tn = _PATH_NAMES.get(b.block_type, "?")
+        if b.block_type == eLabyrinthBlockType.BOSS_QUEST:
+            tn = f"Boss({_get_boss_display_name(_get_boss_unit_id(b.quest_id))})"
+        parts.append(f"{b.column}{rl}【{tn}】")
+    return "-".join(parts)
+
+
+def _can_reach(blocks, fc, fr, tc, tr):
+    src = next((b for b in blocks if b.column == fc and b.row == fr), None)
+    dst = next((b for b in blocks if b.column == tc and b.row == tr), None)
+    if not src or not dst: return False
+    adj = {}
+    for b in blocks:
+        if b.next_block_id_list:
+            for nid in b.next_block_id_list:
+                tgt = next((x for x in blocks if x.block_id == nid), None)
+                if tgt: adj.setdefault(b.block_id, []).append(tgt.block_id)
+    seen, q = {src.block_id}, [src.block_id]
+    while q:
+        cur = q.pop(0)
+        if cur == dst.block_id: return True
+        for n in adj.get(cur, []):
+            if n not in seen: seen.add(n); q.append(n)
+    return False
+
+
+def _has_path_with_min_types(area_blocks: List[LabyrinthMapInfo],
+                             required: Dict[eLabyrinthBlockType, int]) -> List[int]:
+    """Return a path (list of block_ids) from start to end with at least N nodes of each type, or empty list."""
+    starts = [b for b in area_blocks if b.column == 1]
+    if not starts:
+        return []
+    # Build adjacency
+    adj: Dict[int, List[int]] = {}
+    for b in area_blocks:
+        if b.next_block_id_list:
+            for nid in b.next_block_id_list:
+                tgt = next((x for x in area_blocks if x.block_id == nid), None)
+                if tgt:
+                    adj.setdefault(b.block_id, []).append(tgt.block_id)
+    # DFS all paths from each start node
+    def dfs(node_id: int, visited: set, counts: Dict[eLabyrinthBlockType, int],
+            path: List[int]) -> List[int]:
+        node = next(b for b in area_blocks if b.block_id == node_id)
+        new_counts = dict(counts)
+        if node.block_type in new_counts:
+            new_counts[node.block_type] = new_counts[node.block_type] - 1
+        # 用无出边的节点作为终点
+        if not adj.get(node_id):
+            if all(v <= 0 for v in new_counts.values()):
+                return path + [node_id]
+        for nid in adj.get(node_id, []):
+            if nid not in visited:
+                result = dfs(nid, visited | {nid}, new_counts, path + [node_id])
+                if result:
+                    return result
+        return []
+    for s in starts:
+        result = dfs(s.block_id, {s.block_id}, dict(required), [])
+        if result:
+            return result
+    return []
+
+
+def _check_filters(blocks: Dict[int, List[LabyrinthMapInfo]],
+                   dual_ticket: bool, dual_elite: bool, quality_no_event: bool,
+                   quality: bool, log_func) -> bool:
+    """Check additional filters. Returns True if all enabled checks pass."""
+
+    def _has_dual_same_path(area_blocks: List[LabyrinthMapInfo],
+                            target_type: eLabyrinthBlockType) -> bool:
+        """Check if any two nodes of given type are on the same reachable path."""
+        nodes = [b for b in (area_blocks or []) if b.block_type == target_type]
+        if len(nodes) < 2:
+            return False
+        for i, n1 in enumerate(nodes):
+            for n2 in nodes[i + 1:]:
+                if _can_reach(area_blocks, n1.column, n1.row, n2.column, n2.row):
+                    return True
+        return False
+
+    if dual_ticket and not _has_dual_same_path(blocks.get(1), eLabyrinthBlockType.TICKET):
+        return False
+    if dual_elite and not _has_dual_same_path(blocks.get(4), eLabyrinthBlockType.HARD_QUEST):
+        return False
+
+    # 最优路线（含「忽略事件」变体）：要求总实际分达到总理论最高分
+    # 两者算法相同，仅分数表不同：忽略事件时事件记0分
+    if quality or quality_no_event:
+        score_map = _SCORE_MAP_NO_EVENT if quality_no_event else _SCORE_MAP
+        total_actual = total_theoretical = 0
+        for area_num in sorted(blocks):
+            blk = blocks[area_num]
+            score, _ = _optimal_path(blk, score_map)
+            cols: Dict[int, List[LabyrinthMapInfo]] = {}
+            for b in blk: cols.setdefault(b.column, []).append(b)
+            theoretical = sum(max(score_map.get(b.block_type, 0) for b in cols[c]) for c in cols)
+            total_actual += score
+            total_theoretical += theoretical
+        if total_actual < total_theoretical:
+            return False
+
+    return True
+
+
+# --- Config classes ---
+
+class LabyrinthDifficultyConfig(SingleChoiceConfig):
+    def __init__(self, key: str, desc: str):
+        super().__init__(key, desc, 1, [1, 2, 3, 4, 5])
+
+    def candidate_display(self, candidate: int) -> str:
+        return f"难度{candidate}"
+
+
+class LabyrinthGuildConfig(SingleChoiceConfig):
+    def __init__(self, key: str, desc: str):
+        super().__init__(key, desc, 1, lambda: [gid for gid, _ in _load_guild_list()])
+
+    def candidate_display(self, candidate: int) -> str:
+        for gid, gname in _load_guild_list():
+            if gid == candidate:
+                return gname
+        return str(candidate)
+
+    def process_value(self, value):
+        if isinstance(value, (tuple, list)):
+            return int(value[0])
+        if isinstance(value, str):
+            return int(value.split(',')[0].strip())
+        return int(value)
+
+    def validate_value(self, value):
+        valid_ids = {gid for gid, _ in _load_guild_list()}
+        return value if value in valid_ids else None
+
+
+class LabyrinthBossMultiConfig(MultiChoiceConfig):
+    def __init__(self, key: str, desc: str, area: int):
+        self._area = area
+        self._ids = _AREA3_UNIT_IDS if area == 3 else _AREA5_UNIT_IDS
+        super().__init__(key, desc, [], lambda: list(self._ids), short_display=True)
+
+    def candidate_display(self, candidate: int) -> str:
+        return _BOSS_META.get(candidate, str(candidate))
+
+    def candidate_tag(self, candidate: int) -> List[str]:
+        return []
+
+    def process_value(self, value):
+        if not value:
+            return []
+        if not isinstance(value, list):
+            value = [value]
+        result = []
+        for v in value:
+            if v is None:
+                continue
+            if isinstance(v, (tuple, list)):
+                result.append(int(v[0]))
+            else:
+                result.append(int(v))
+        return result
+
+    def validate_value(self, value: List):
+        if not value:
+            return []
+        valid = [v for v in value if v in self._ids]
+        return valid if valid else None
+
+
+# --- Modules ---
+
+@description('黎明界刷开局，支持 Boss 筛选。基础路线为1图双角色+4图双精英，最优路线为理论分数最高，最优路线（忽略事件）为事件不计分时的理论分数最高。')
+@name("黎明界刷开局")
+@LabyrinthBossMultiConfig("labyrinth_reset_boss_area5", "区域5 Boss（与区域3合计至少选4个）", area=5)
+@LabyrinthBossMultiConfig("labyrinth_reset_boss_area3", "区域3 Boss（与区域5合计至少选4个）", area=3)
+@LabyrinthGuildConfig("labyrinth_reset_guild", "公会")
+@LabyrinthDifficultyConfig("labyrinth_reset_difficulty", "难度")
+@SingleChoiceConfig("labyrinth_reset_route_pref", "路线偏好", "基础路线", ["基础路线", "最优路线", "最优路线（忽略事件）"])
+@IntConfig("labyrinth_reset_max_attempts", "尝试次数上限", 100, list(range(1, 501)))
+class labyrinth_reset(Module):
     async def do_task(self, client: pcrclient):
-        guild_id: int = self.get_config('labyrinth_reroll_guild_id')
-        difficulty: int = self.get_config('labyrinth_reroll_difficulty')
-        area3_bosses: Set[int] = set(self.get_config('labyrinth_reroll_area3_boss'))
-        area5_bosses: Set[int] = set(self.get_config('labyrinth_reroll_area5_boss'))
-        third_block_type: str = self.get_config('labyrinth_reroll_third_block_type')
-        second_block_type: str = self.get_config('labyrinth_reroll_second_block_type')
-        perfect_start: bool = self.get_config('labyrinth_reroll_perfect_start')
-        max_count: int = self.get_config('labyrinth_reroll_max_count')
-        expected_block_types = self._build_expected_block_types(third_block_type, second_block_type)
+        difficulty = self.get_config("labyrinth_reset_difficulty")
+        guild_id = self.get_config("labyrinth_reset_guild")
+        target_bosses_area3: List[int] = self.get_config("labyrinth_reset_boss_area3")
+        target_bosses_area5: List[int] = self.get_config("labyrinth_reset_boss_area5")
+        route_pref = self.get_config("labyrinth_reset_route_pref")
+        dual_ticket = (route_pref == "基础路线")
+        dual_elite = (route_pref == "基础路线")
+        # 两者算法相同（要求理论满分），仅分数表不同：忽略事件时事件记0分
+        quality_no_event = (route_pref == "最优路线（忽略事件）")
+        quality = (route_pref == "最优路线")
+        max_attempts = self.get_config("labyrinth_reset_max_attempts")
 
-        top = await client.labyrinth_top()
-        max_unlocked_difficulty = self._max_unlocked_difficulty(top)
-        if difficulty > max_unlocked_difficulty:
-            self._warn(f"黎明界难度{difficulty}尚未解锁，当前最大可挑战难度为{max_unlocked_difficulty}，跳过执行。")
-            raise AbortError("未解锁所选黎明界难度")
+        if not target_bosses_area3:
+            raise AbortError("请至少选择一个区域3 Boss")
+        if not target_bosses_area5:
+            raise AbortError("请至少选择一个区域5 Boss")
+        if len(target_bosses_area3) + len(target_bosses_area5) < 4:
+            raise AbortError(
+                f"区域3与区域5 Boss合计至少需选择 4 个，当前共 {len(target_bosses_area3) + len(target_bosses_area5)} 个")
 
+        # Check labyrinth ticket count
+        ticket_cnt = client.data.get_inventory((eInventoryType.Item, 99013))
+        self._log(f"迷宫通行证: {ticket_cnt} 张")
+        if ticket_cnt <= 0:
+            raise AbortError("迷宫通行证不足，无法进入黎明界")
+
+        names3 = ', '.join(_get_boss_display_name(uid) for uid in target_bosses_area3)
+        names5 = ', '.join(_get_boss_display_name(uid) for uid in target_bosses_area5)
+
+        self._log(f"目标: 难度{difficulty}, 公会{guild_id}")
+        self._log(f"  区域3 Boss: {names3}")
+        self._log(f"  区域5 Boss: {names5}")
+
+        top = await client.request(LabyrinthTopRequest())
         if top.enter_id:
-            self._log("检测到已有黎明界开局，先撤退。")
-            await client.labyrinth_retire(top.enter_id)
+            raise AbortError(
+                f"当前有进行中的黎明界 (enter_id={top.enter_id}, "
+                f"公会={top.guild_id}, 难度={top.difficulty})。\n"
+                f"请先通过网页端【放弃黎明界】或游戏内手动放弃后，再使用刷开局功能。"
+            )
 
-        for attempt in range(1, max_count + 1):
-            enter = await client.labyrinth_enter(guild_id, difficulty)
-            routes, _ = self._find_routes(enter.map_list or [], difficulty, area3_bosses, area5_bosses, perfect_start, expected_block_types)
-            if routes:
-                self._log(f"刷到{'完美' if perfect_start else ''}路线，总尝试次数：{attempt}")
-                for area in sorted(routes):
-                    self._log(self._format_route(area, routes[area], enter.map_list or [], area3_bosses, area5_bosses))
-                return
+        max_attempts = self.get_config("labyrinth_reset_max_attempts")
+        for attempt in range(1, max_attempts + 1):
+            enter_resp = await client.request(LabyrinthEnterRequest(
+                guild_id=guild_id,
+                difficulty=difficulty
+            ))
+            enter_id = enter_resp.enter_id
 
-            if enter.enter_id:
-                await client.labyrinth_retire(enter.enter_id)
-            await client.labyrinth_top()
+            # Group by area & check
+            areas_dict: Dict[int, List[LabyrinthMapInfo]] = {}
+            for b in enter_resp.map_list:
+                areas_dict.setdefault(b.area, []).append(b)
 
-        raise AbortError(f"重开{max_count}次仍未刷到目标路线")
+            boss_ok = True
+            for area_num in sorted(areas_dict):
+                for b in areas_dict[area_num]:
+                    if b.block_type == eLabyrinthBlockType.BOSS_QUEST:
+                        uid = _get_boss_unit_id(b.quest_id)
+                        targets = target_bosses_area3 if b.area == 3 else target_bosses_area5
+                        if uid not in targets:
+                            boss_ok = False
+
+            if not boss_ok:
+                await client.request(LabyrinthRetireRequest(enter_id=enter_id))
+                continue
+
+            if not _check_filters(areas_dict, dual_ticket, dual_elite, quality_no_event, quality, self._log):
+                await client.request(LabyrinthRetireRequest(enter_id=enter_id))
+                continue
+
+            # Success - print full details
+            self._log(f"--- 第{attempt}次尝试 ---")
+            route_label = route_pref.replace("路线", "") + "路线"
+            self._log(f"🎉 命中目标{route_label}开局，总尝试次数:{attempt}")
+            # 计算/展示用的分数表：忽略事件时事件记0分
+            score_map = _SCORE_MAP_NO_EVENT if quality_no_event else _SCORE_MAP
+            total_actual = 0
+            for area_num in sorted(areas_dict):
+                blk = areas_dict[area_num]
+                if dual_ticket and area_num == 1:
+                    path_ids = _has_path_with_min_types(blk, {eLabyrinthBlockType.TICKET: 2})
+                    actual_score = sum(score_map.get(
+                        next(b for b in blk if b.block_id == bid).block_type, 0) for bid in path_ids)
+                elif dual_elite and area_num == 4:
+                    path_ids = _has_path_with_min_types(blk, {eLabyrinthBlockType.HARD_QUEST: 2})
+                    actual_score = sum(score_map.get(
+                        next(b for b in blk if b.block_id == bid).block_type, 0) for bid in path_ids)
+                else:
+                    actual_score, path_ids = _optimal_path(blk, score_map)
+                path_str = _fmt_path(blk, path_ids)
+                cols: Dict[int, List[LabyrinthMapInfo]] = {}
+                for b in blk: cols.setdefault(b.column, []).append(b)
+                theoretical = sum(max(score_map.get(b.block_type, 0) for b in cols[c]) for c in cols)
+                total_actual += actual_score
+                boss_tag = ""
+                for b in blk:
+                    if b.block_type == eLabyrinthBlockType.BOSS_QUEST:
+                        boss_tag = f"  ✓{_get_boss_display_name(_get_boss_unit_id(b.quest_id))}"
+                self._log(f"  区域{area_num}:{path_str}  理论:{theoretical} 实际:{actual_score}{boss_tag}")
+
+            guild_name = ""
+            for gid, gname in _load_guild_list():
+                if gid == guild_id: guild_name = gname; break
+            self._log(f"  难度:{difficulty} 公会:{guild_name} 总计理论:{total_actual}")
+
+            self._table({
+                "结果": "成功",
+                "尝试次数": str(attempt),
+                "enter_id": str(enter_id),
+                "难度": str(difficulty),
+                "公会": guild_name,
+            })
+            return
+
+        raise AbortError(f"已达到最大尝试次数({max_attempts})，仍未刷到符合设定的开局")
 
 
-@description('当黎明界通行证超过保留数量时，使用超出的通行证扫荡。难度自动使用所选公会已通关的最高难度。')
-@name('黎明界扫荡')
-@inttype('labyrinth_sweep_ticket_hold', '保留黎明界票数', 96, list(range(100)))
-@LabyrinthGuildConfig('labyrinth_sweep_guild_id', '公会', 5)
+@description('放弃当前进行中的黎明界探索，不进行结算。')
+@name("放弃黎明界")
 @default(True)
-class labyrinth_sweep(Module):
-    def _max_cleared_difficulty(self, top, guild_id: int) -> Optional[int]:
-        cleared = [
-            info.difficulty
-            for info in (top.guild_cleared_difficulty_list or [])
-            if info.guild_id == guild_id and info.difficulty is not None
-        ]
-        return max(cleared) if cleared else None
-
+class labyrinth_retire(Module):
     async def do_task(self, client: pcrclient):
-        ticket_hold: int = self.get_config('labyrinth_sweep_ticket_hold')
-        guild_id: int = self.get_config('labyrinth_sweep_guild_id')
-        ticket_count = client.data.get_inventory(db.labyrinth_ticket)
-        skip_count = ticket_count - ticket_hold
-        if skip_count <= 0:
-            raise SkipError(f'当前黎明界票数为{ticket_count}，不超过保留数量{ticket_hold}')
+        top = await client.request(LabyrinthTopRequest())
+        if not top.enter_id:
+            self._log("当前没有进行中的黎明界，无需放弃")
+            return
 
-        top = await client.labyrinth_top()
+        self._log(f"检测到进行中的黎明界:")
+        self._log(f"  enter_id: {top.enter_id}")
+        self._log(f"  公会: {top.guild_id}")
+        self._log(f"  难度: {top.difficulty}")
 
-        if top.enter_id:
-            self._log("检测到已有黎明界开局，先撤退。")
-            await client.labyrinth_retire(top.enter_id)
-            top = await client.labyrinth_top()
-            ticket_count = client.data.get_inventory(db.labyrinth_ticket)
+        await client.request(LabyrinthRetireRequest(enter_id=top.enter_id))
+        self._log("已放弃本次探索")
 
-        difficulty = self._max_cleared_difficulty(top, guild_id)
-        if difficulty is None:
-            raise AbortError(f'公会{guild_id}尚未通关黎明界，无法扫荡！')
+        self._table({
+            "结果": "已放弃",
+            "enter_id": str(top.enter_id),
+            "公会": str(top.guild_id),
+            "难度": str(top.difficulty),
+        })
 
-        self._log(f'公会{guild_id}，难度{difficulty}，当前票数{ticket_count}，扫荡{skip_count}次')
-        response = await client.labyrinth_skip(guild_id, skip_count)
-        rewards = []
-        for reward_list in (
-            response.skip_reward_list,
-            response.treasure_box_reward_list,
-            response.item_list,
-        ):
-            rewards.extend(reward_list or [])
-        if rewards:
-            self._log(await client.serialize_reward_summary(rewards))
+
+@description('查看当前进行中的黎明界地图（不进入/不撤退，仅查看）。\n如果没有进行中的黎明界则无操作。')
+@name("查看黎明界地图")
+@default(True)
+class labyrinth_view(Module):
+    async def do_task(self, client: pcrclient):
+        top = await client.request(LabyrinthTopRequest())
+        if not top.enter_id:
+            self._log("当前没有进行中的黎明界")
+            return
+
+        self._log(f"正在查看进行中的黎明界:")
+        self._log(f"  enter_id: {top.enter_id}")
+        self._log(f"  公会: {top.guild_id}")
+        self._log(f"  难度: {top.difficulty}")
+
+        resume = await client.request(LabyrinthResumeRequest(
+            enter_id=top.enter_id
+        ))
+
+        if resume.map_list:
+            _draw_map(self._log, resume.map_list)
+        else:
+            self._log("未获取到地图数据")
