@@ -56,14 +56,17 @@ class get_explore_drop_memory_demand(Module):
                 continue
 
             owned = unit_id in client.data.unit
-            ud = client.data.unit[unit_id] if owned else db.unit_data[unit_id]
+            ud = client.data.unit[unit_id] if owned else db.unit_data.get(unit_id)
+            if ud is None:
+                # 不在角色主表中的单位（如特殊/异常单位：有碎片映射但无角色数据）无法统计，跳过
+                continue
             # 已拥有角色起点为当前星级 unit_rarity；未拥有角色在 unit_data 表中只有基础稀有度 rarity
             start_rarity = ud.unit_rarity if owned else ud.rarity
             # 是否明确开 6 星：升星需求表含 6 级即表示可 6 星（对所有角色一致，含未拥有）
             # 避免依赖已拥有角色专属的 unlock_rarity_6_item 关系
             can_rarity_6 = unit_id in db.rarity_up_required and 6 in db.rarity_up_required[unit_id]
             target = 6 if can_rarity_6 else 5
-            # rarity_up_required 仅含可升星角色；不在表中的角色（如极新角色）无法计算星级缺口，记为 0
+            # rarity_up_required 仅含可升星角色；极端情况下不在表中的角色无法计算星级缺口，记为 0
             rarity_demand = db.get_rarity_memory_demand(unit_id, start_rarity, target, token) if unit_id in db.rarity_up_required else 0
 
             has_ue = (unit_id in db.unit_unique_equip[1]) or (unit_id in sp_units)
