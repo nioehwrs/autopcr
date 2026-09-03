@@ -49,6 +49,10 @@ class get_explore_drop_memory_demand(Module):
 
         result = []
         for unit_id, memory_id in db.unit_to_memory.items():
+            # 排除剧情/NPC/召唤物等非玩家可控单位（集中在特殊 id 段：4xxxx 召唤物、9xxxx/17-19xxxx 剧情角色等）
+            # 正常玩家可拥有角色均在 10xxxx~13xxxx 段
+            if (unit_id // 10000) in (17, 18, 19, 40, 41, 42, 43, 90, 92, 93):
+                continue
             token = (eInventoryType.Item, memory_id)
             if token in db.memory_hard_quest or token in db.memory_shiori_quest:
                 continue
