@@ -9,6 +9,7 @@ from .clan import *
 from .cron import *
 from .daily import *
 from .exequip import *
+from .explore_drop import *
 from .gacha import *
 from .hatsune import *
 from .labyrinth import *
@@ -230,5 +231,6 @@ tool_modules = ModuleList(
         remove_cb_support,
         remove_normal_ex_equip,
         redeem_unit_swap,
+        get_explore_drop_memory_demand,
     ]
 )
