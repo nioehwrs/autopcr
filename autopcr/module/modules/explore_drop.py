@@ -25,10 +25,10 @@ def _exceed_demand(client: pcrclient, unit_id: int) -> int:
         return 0
     return db.exceed_level_unit_required[unit_id].consume_num_1
 
-@name('获取探险掉落碎片缺口')
+@name('角色碎片缺口')
 @notlogin(check_data = True)
 @default(True)
-@description('计算碎片只能靠探险随机掉落获取的角色，其星级/专武/突破/SP专的总缺口（扣除库存与母猪石前80片），用于设定探险掉落目标')
+@description('计算角色的星级/专武/突破/SP专的总缺口')
 class get_explore_drop_memory_demand(Module):
     async def do_task(self, client: pcrclient):
         # 母猪石已购数量 + 商店排除 token
