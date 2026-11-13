@@ -48,6 +48,7 @@ class datamgr(BaseModel, Component[apiclient]):
     read_story_ids: List[int] = None
     unlock_story_ids: List[int] = None
     seven_story_list: Dict[int, Dict[int, SevenStoryInfo]] = {}
+    mre_story_list: Dict[int, Dict[int, SevenStoryInfo]] = {}
     event_statuses: List[EventStatus] = None
     tower_status: TowerStatus = None
     deck_list: Dict[ePartyType, LoadDeckData] = {}
@@ -85,6 +86,8 @@ class datamgr(BaseModel, Component[apiclient]):
 
     def update_stamina_recover(self):
         max_stamina = db.team_info[self.team_level].max_stamina
+        if self.stamina >= max_stamina:
+            return
         now = apiclient.time
         remain = max(0, self.stamina_full_recovery_time - now + self.settings.quest.recovery_time - 1) // self.settings.quest.recovery_time
         self.stamina = max_stamina - remain
